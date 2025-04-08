@@ -5,14 +5,14 @@
 #include <limits.h>
 #include <time.h>
 
-char* FILENAME;
+// HUGE todo - free everything i malloc lol
 
 #define MAX_SOK_ROW_LENGTH 512
 
 #define EMPTY (0)
 #define GOAL (1)
 #define PLAYER (2) // superposition player
-#define ORIGINAL_PLAYER (16) //non-superposition player, added during spread
+#define ORIGINAL_PLAYER (16) //non-superposition player, added during spread, eventually used for within-state pathfinding for player
 #define BOX (4)
 #define WALL (8)
 
@@ -28,6 +28,7 @@ int RIGHT;
 int DOWN;
 int DIRECTION[4];
 char* LURD = "LURD";
+int N_PLAYERS;
 int N_BOXES;
 int N_GOALS;
 int MAX_POSSIBLE_FUTURES;
@@ -99,6 +100,7 @@ int heuristic(char* level) {
 	return cost / 2;
 }
 
+int GAME_STATE_NODES_MADE = 0;
 struct game_state_node* make_game_state_node(char* level) {
 	long hash = state_hash(level);
 	int bucket = hash % STATES_HASH_TABLE_SIZE;
@@ -125,6 +127,7 @@ struct game_state_node* make_game_state_node(char* level) {
 	node->futures = NULL;
 	node->next_in_hash_table = GAME_STATES_HASH_TABLE[bucket];
 	GAME_STATES_HASH_TABLE[bucket] = node;
+	GAME_STATE_NODES_MADE++;
 	return node;
 }
 
@@ -139,15 +142,6 @@ int find_location_of_box_that_moved(char* original, char* new) {
 	for (i = 0; i < WIDTH*HEIGHT; i++) if (original[i] & BOX) if (!(new[i] & BOX)) return i;
 	printf("Couldn't find a box that moved in this state transition\n");
 	exit(EXIT_FAILURE);
-}
-
-FILE* get_fptr() {
-	FILE* fptr = fopen(FILENAME, "r");
-	if (fptr == NULL) {
-		printf("Couldn't read file \"%s\"\n", FILENAME);
-		exit(EXIT_FAILURE);
-	}
-	return fptr;
 }
 
 char* copy_level(char* level) {
@@ -181,6 +175,8 @@ char sok_to_native(char sok) {
 	if (sok == '$') return BOX;
 	if (sok == '+') return GOAL | PLAYER;
 	if (sok == '*') return GOAL | BOX;
+	if (sok == '-') return EMPTY;
+	if (sok == '_') return EMPTY;
 	printf("Couldn't translate SOK character '%c' (%d)\n", sok, sok);
 	exit(EXIT_FAILURE);
 }
@@ -359,22 +355,32 @@ void print_solution(struct game_state_node* state) {
 	//print_state(state);
 }
 
-int main(int argc, char** argv) {
-	FILENAME = argv[1];
-	int i, j;
+int main() {
 	
-	// Find maximum row length, determines WIDTH. also find HEIGHT
+	//Read input stream, determine WIDTH and HEIGHT
+	char* INPUT = (char*) malloc(sizeof(char) * MAX_SOK_ROW_LENGTH * MAX_SOK_ROW_LENGTH);
+	int input_index = 0;
+	char c;
 	WIDTH = 0;
 	HEIGHT = 0;
-	FILE* fptr = get_fptr();
-	char line[MAX_SOK_ROW_LENGTH];
-	while (fgets(line, MAX_SOK_ROW_LENGTH, fptr)) {
-		int string_length = 0; //string length, excluding whitespace
-		while (line[string_length] != '\0' && line[string_length] != '\n') string_length++;
-		if (string_length > WIDTH) WIDTH = string_length;
-		HEIGHT++;
+	int current_width_streak = 0;
+	while (true) {
+		c = getchar();
+		if (c == EOF || c == '\0') break;
+		INPUT[input_index++] = c;
+		if (c == '\n') {
+			if (current_width_streak > WIDTH) WIDTH = current_width_streak;
+			current_width_streak = 0;
+			HEIGHT++;
+		} else {
+			current_width_streak++;
+		}
 	}
-	fclose(fptr);
+	if (current_width_streak > WIDTH) WIDTH = current_width_streak;
+	if (current_width_streak) HEIGHT++;
+	INPUT[input_index] = '\0';
+	
+	int i, j;
 	
 	// Establish directions
 	LEFT = DIRECTION[0] = -1;
@@ -382,28 +388,39 @@ int main(int argc, char** argv) {
 	RIGHT = DIRECTION[2] = 1;
 	DOWN = DIRECTION[3] = WIDTH;
 	
-	// Read into level array
+	// Read INPUT into level array
 	char* level = (char*) malloc (sizeof(char) * WIDTH * HEIGHT);
 	for (i = 0; i < WIDTH * HEIGHT; i++) level[i] = EMPTY;
 	N_BOXES = 0;
 	N_GOALS = 0;
-	int y, x;
-	fptr = get_fptr();
-	for (y = 0; y < HEIGHT; y++) {
-		fgets(line, MAX_SOK_ROW_LENGTH, fptr);
-		for (x = 0; x < WIDTH; x++) {
-			if (line[x] == '\0') break;
-			if (line[x] == '\n') break;
-			level[y*WIDTH+x] = sok_to_native(line[x]);
+	int y = 0;
+	int x = 0;
+	input_index = 0;
+	while (true) {
+		c = INPUT[input_index++];
+		if (c == EOF || c == '\0') break;
+		else if (c == '\n') {
+			y++;
+			x = 0;
+		} else {
+			level[y*WIDTH+x] = sok_to_native(c);
 			if (level[y*WIDTH+x] & BOX) N_BOXES++;
 			if (level[y*WIDTH+x] & GOAL) N_GOALS++;
+			if (level[y*WIDTH+x] & PLAYER) N_PLAYERS++;
+			x++;
 		}
 	}
-	fclose(fptr);
 	
-	//TODO: check that there is only one player, that the player is bounded by walls
+	free(INPUT);
+	print_level(level);
+	
+	//TODO: check that the player is bounded by walls
 	if (N_GOALS != N_BOXES) {
 		printf("There are %d goals but %d boxes\n", N_GOALS, N_BOXES);
+		exit(EXIT_FAILURE);
+	}
+	if (N_PLAYERS != 1) {
+		printf("There are %d players\n", N_PLAYERS);
 		exit(EXIT_FAILURE);
 	}
 	MAX_POSSIBLE_FUTURES = N_BOXES * 4 + 1; //maximum number of moves that can be made in any state; always strictly less, so that last pointer can be null
@@ -432,7 +449,6 @@ int main(int argc, char** argv) {
 			}	
 		}
 	}
-	print_level(level);
 	
 	player_spread(level);
 	
@@ -481,9 +497,10 @@ int main(int argc, char** argv) {
 		//print_state(pick);
 		if (level_is_solved(pick->level)) {
 			clock_t end = clock();
-			double time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 			print_solution(pick);
-			printf("\n(Found in %d ms)\n", (int)(time_spent*1000));
+			printf("\n\n");
+			//printf("Searched %d states in %d ms\n", GAME_STATE_NODES_MADE, (int)((double)(end - begin) / CLOCKS_PER_SEC * 1000));
+			printf("Found in %d ms\n", (int)((double)(end - begin) / CLOCKS_PER_SEC * 1000));
 			exit(EXIT_SUCCESS);
 		}
 		frontier[pick_position_in_frontier] = NULL;
@@ -509,4 +526,13 @@ int main(int argc, char** argv) {
 			}
 		}
 	}
+	
+	//free everything
+	free(GOAL_POSITIONS);
+	free(BOX_POSITIONS);
+	
+	//free all the game state nodes, also free their futures
+	
+	
+	//free the WALKING_DISTANCE_MATRIX
 }
