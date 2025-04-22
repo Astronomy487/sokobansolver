@@ -1,170 +1,152 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <stdbool.h>
-#include <limits.h>
 #include <time.h>
 
-// HUGE todo - free everything i malloc lol
+#define MAX_LEVEL_SIZE 65536
 
-#define MAX_SOK_ROW_LENGTH 512
-
-#define EMPTY (0)
-#define GOAL (1)
-#define PLAYER (2) // superposition player
-#define ORIGINAL_PLAYER (16) //non-superposition player, added during spread, eventually used for within-state pathfinding for player
-#define BOX (4)
-#define WALL (8)
-
-#define TIMEOUT_TIME 600
-
-#define STATES_HASH_TABLE_SIZE 2048
+char* INPUT_SOK;
 
 int WIDTH;
 int HEIGHT;
+#define SIZE (WIDTH*HEIGHT)
+int N_BOXES;
+int N_GOALS;
+
+char* LURD = "LURD";
+
+#define GROWTH_FACTOR (4*N_BOXES)
+
+int INITIAL_PLAYER_POSITION;
+int* INITIAL_BOX_POSITIONS;
+int* GOAL_POSITIONS;
+
 int LEFT;
 int UP;
 int RIGHT;
 int DOWN;
-int DIRECTION[4];
-char* LURD = "LURD";
-int N_PLAYERS;
-int N_BOXES;
-int N_GOALS;
-int MAX_POSSIBLE_FUTURES;
-int* GOAL_POSITIONS;
-int* BOX_POSITIONS; //changes with each run of heuristic
-int** WALKING_DISTANCE_MATRIX; //could make this char ?
+int DIRECTIONS[4];
 
-struct game_state_node {
+int add(int a, int b) {
+	if (a == INT_MAX) return INT_MAX;
+	if (b == INT_MAX) return INT_MAX;
+	return a + b;
+}
+
+#define FROM_LEFT_SIDE 'L'
+#define FROM_RIGHT_SIDE 'R' //constants to describe which end a game state node came from
+
+#define MAX_FUTURES (4*N_BOXES)
+
+int** BOX_PUSHING_DISTANCE_MATRIX; //M[i][j] is minimum # pushes to push a box from i to j
+
+#define EMPTY (0)
+#define GOAL (1)
+#define PLAYER (2)
+#define BOX (4)
+#define WALL (8)
+#define OG_PLAYER (16)
+
+#define GAMESTATE_HASH_TABLE_SIZE (65536)
+struct gamestate** GAMESTATE_HASH_TABLE;
+
+struct gamestate {
 	char* level;
-	long H;
-	int g_score; //length of cheapest known path back to start node
-	int h_score; //heuristic, purely a function of level state
-	//f_score := g_score + h_score, always always always
-	struct game_state_node* previous; //starts as null; is the IDEAL predecessor node
-	struct game_state_node** futures; //starts as null; gets populated once we remove it from frontier
-	struct game_state_node* next_in_hash_table; //just used to traverse the hash table
+	int hash;
+	struct gamestate* next_in_hash_table;
+	struct gamestate* point_back;
+	char origin_side;
+	
+	int h_score; //precomputed, heuristic
+	int g_score;
+	int f_score;
+	bool ever_been_in_frontier;
 };
 
-#define MAX_FRONTIER_SIZE 100000
-//TODO ^^^ REPLACE THAT WITH SOME HASH TABLE SCHEME!!! faster lookup will be important one day
-struct game_state_node* GAME_STATES_HASH_TABLE[STATES_HASH_TABLE_SIZE];
-
-long state_hash(char* level) { //assumes player spread, assumes particular stage. gives a unique (?) number for every state
-	//given a particular stage, a hash for a current state need only be a function of
-	// (1) where each of the boxes are
-	// (2) the first player location (all contiguous region is also player)
-	long val = 0;
-	int i;
-	for (i = 0; i < WIDTH*HEIGHT; i++) if (level[i] & BOX) val += (i*i*i);
-	for (i = 0; true; i++) if (level[i] & PLAYER) return val + i;
-}
-
-int heuristic(char* level) {
-	/*
-	
-	I envision a better heuristic algo
-	find the location of every box and every goal
-	find their distance matrix (really just using WALKING_DISTANCE_MATRIX)
-	find minimum-weight matching (graph theory!)
-	
-	*/
-	
-	//fill BOX_POSITIONS values
-	int i;
-	int b = 0;
-	for (i = 0; b < N_BOXES; i++) if (level[i] & BOX) BOX_POSITIONS[b++] = i;
-	
-	//for now, just pair every box to its closest goal, and every goal to its closest box
-	//good enough
-	//https://pub.ista.ac.at/~vnk/papers/BLOSSOM5.html
-	
-	int cost = 0;
-	for (i = 0; i < N_BOXES; i++) {
-		int closest_goal_distance = INT_MAX;
-		for (b = 0; b < N_GOALS; b++) {
-			int distance = WALKING_DISTANCE_MATRIX[BOX_POSITIONS[i]][GOAL_POSITIONS[b]];
-			if (distance < closest_goal_distance) closest_goal_distance = distance;
-		}
-		cost += closest_goal_distance;
-	}
-	for (i = 0; i < N_GOALS; i++) {
-		int closest_box_distance = INT_MAX;
-		for (b = 0; b < N_BOXES; b++) {
-			int distance = WALKING_DISTANCE_MATRIX[GOAL_POSITIONS[i]][BOX_POSITIONS[b]];
-			if (distance < closest_box_distance) closest_box_distance = distance;
-		}
-		cost += closest_box_distance;
-	}
-	return cost / 2;
-}
-
-int GAME_STATE_NODES_MADE = 0;
-struct game_state_node* make_game_state_node(char* level) {
-	long hash = state_hash(level);
-	int bucket = hash % STATES_HASH_TABLE_SIZE;
-	int i;
-	//if another game_state_node already has this hash, free level and return that
-	if (GAME_STATES_HASH_TABLE[bucket]) {
-		struct game_state_node* node = GAME_STATES_HASH_TABLE[bucket];
-		while (node != NULL && node->H != hash) {
-			node = node->next_in_hash_table;
-		}
-		if (node) if (node->H == hash) {
-			free(level);
-			return node;
-		}
-	}
-	
-	//otherwise, make a new node
-	struct game_state_node* node = (struct game_state_node*) malloc(sizeof(struct game_state_node));
-	node->level = level;
-	node->previous = NULL;
-	node->H = hash;
-	node->g_score = INT_MAX; 
-	node->h_score = heuristic(level);
-	node->futures = NULL;
-	node->next_in_hash_table = GAME_STATES_HASH_TABLE[bucket];
-	GAME_STATES_HASH_TABLE[bucket] = node;
-	GAME_STATE_NODES_MADE++;
-	return node;
-}
-
-int find_original_player(char* level) {
-	int i;
-	for (i = 0; i < WIDTH*HEIGHT; i++) if (level[i] & ORIGINAL_PLAYER) return i;
-	printf("Couldn't find ORIGINAL_PLAYER in level array\n");
-	exit(EXIT_FAILURE);
-}
-int find_location_of_box_that_moved(char* original, char* new) {
-	int i;
-	for (i = 0; i < WIDTH*HEIGHT; i++) if (original[i] & BOX) if (!(new[i] & BOX)) return i;
-	printf("Couldn't find a box that moved in this state transition\n");
-	exit(EXIT_FAILURE);
+bool identical_levels(char* a, char* b) {
+	for (int i = 0; i < SIZE; i++) if ((a[i] & ~OG_PLAYER) != (b[i] & ~OG_PLAYER)) return false;
+	return true;
 }
 
 char* copy_level(char* level) {
-	char* new_level = (char*) malloc(sizeof(char) * WIDTH * HEIGHT);
+	char* copy = (char*) malloc(sizeof(char) * SIZE);
 	int i;
-	for (i = 0; i < WIDTH*HEIGHT; i++) new_level[i] = level[i];
-	return new_level;
+	for (i = 0; i < SIZE; i++) copy[i] = level[i];
+	return copy;
 }
 
-bool level_is_already_dud(char* level) { //look for Horrible Catastrophic Things That Can't Be Fixed, like unsalvagable boxes in corners
+int level_hash(char* level) {
 	int i;
-	for (i = 0; i < WIDTH*HEIGHT; i++) if (level[i] & BOX) if (!(level[i] & GOAL)) {
-		bool horizontally_fixed = (level[i + LEFT] & WALL) || (level[i + RIGHT] & WALL);
-		bool vertically_fixed = (level[i + UP] & WALL) || (level[i + DOWN] & WALL);
-		if (horizontally_fixed && vertically_fixed) return true;
+	int h = 0;
+	for (i = 0; i < SIZE; i++) if (level[i] & BOX) h += i*i*i;
+	for (i = 0; i < SIZE; i++) if (level[i] & PLAYER) return h + i;
+	printf("Couldn't compute level hash - has no players?\n");
+	exit(EXIT_FAILURE);
+}
+
+int hungarian(int* weights, int n) {
+	int total = 0;
+	int i, j;
+	for (i = 0; i < n; i++) {
+		int min_seen = INT_MAX;
+		for (j = 0; j < n; j++) if (weights[i*n+j] < min_seen) min_seen = weights[i*n+j];
+		total = add(total, min_seen);
 	}
-	return false;
+	for (j = 0; j < n; j++) {
+		int min_seen = INT_MAX;
+		for (i = 0; i < n; i++) if (weights[i*n+j] < min_seen) min_seen = weights[i*n+j];
+		total = add(total, min_seen);
+	}
+	return total / 2;
 }
 
-bool level_is_solved(char* level) {
+
+
+int level_heuristic(char* level, int origin_side) {
 	int i;
-	for (i = 0; i < WIDTH*HEIGHT; i++) if (level[i] & BOX) if (!(level[i] & GOAL)) return false;
-	return true;
+	int j = 0;
+	int* box_positions = (int*) malloc(sizeof(int) * N_BOXES);
+	for (i = 0; i < SIZE; i++) if (level[i] & BOX) box_positions[j++] = i;
+	
+	int* weights = (int*) malloc(sizeof(int) * N_BOXES * N_BOXES);
+	
+	if (origin_side == FROM_LEFT_SIDE) {
+		for (i = 0; i < N_BOXES; i++) for (j = 0; j < N_BOXES; j++)
+			weights[i*N_BOXES+j] = BOX_PUSHING_DISTANCE_MATRIX[box_positions[i]][GOAL_POSITIONS[j]];
+	} else if (origin_side == FROM_RIGHT_SIDE) {
+		for (i = 0; i < N_BOXES; i++) for (j = 0; j < N_BOXES; j++)
+			weights[i*N_BOXES+j] = BOX_PUSHING_DISTANCE_MATRIX[INITIAL_BOX_POSITIONS[i]][box_positions[j]];
+	}
+	int result = hungarian(weights, N_BOXES);
+	free(box_positions);
+	return result;
+}
+
+struct gamestate* make_gamestate(char* level, int origin_side) {
+	int hash = level_hash(level);
+	struct gamestate* walker = GAMESTATE_HASH_TABLE[hash % GAMESTATE_HASH_TABLE_SIZE];
+	while (walker) {
+		if (walker->hash == hash) if (identical_levels(walker->level, level)) {
+			if (origin_side != walker->origin_side) {
+				// printf("( From other side ! )\n");
+			}
+			free(level);
+			return walker;
+		}
+		walker = walker->next_in_hash_table;
+	}
+	struct gamestate* new_node = (struct gamestate*) malloc(sizeof(struct gamestate));
+	new_node->level = level;
+	new_node->hash = hash;
+	new_node->next_in_hash_table = GAMESTATE_HASH_TABLE[hash % GAMESTATE_HASH_TABLE_SIZE];
+	new_node->origin_side = origin_side;
+	new_node->point_back = NULL;
+	new_node->h_score = level_heuristic(level, origin_side);
+	new_node->g_score = INT_MAX;
+	new_node->f_score = INT_MAX;
+	new_node->ever_been_in_frontier = false;
+	GAMESTATE_HASH_TABLE[hash % GAMESTATE_HASH_TABLE_SIZE] = new_node;
+	return new_node;
 }
 
 char sok_to_native(char sok) {
@@ -182,7 +164,8 @@ char sok_to_native(char sok) {
 }
 
 char native_to_sok(char native) {
-	native &= ~ORIGINAL_PLAYER; //ignore ORIGINAL_PLAYER tag
+	if (!(native & OG_PLAYER)) native &= ~PLAYER;
+	native &= ~OG_PLAYER;
 	if (native == EMPTY) return ' ';
 	if (native == WALL) return '#';
 	if (native == GOAL) return '.';
@@ -204,335 +187,425 @@ void print_level(char* level) {
 	printf("\n");
 }
 
-void print_state(struct game_state_node* node) {
-	printf("[State %d, g = %d, h = %d]\n", node->H, node->g_score, node->h_score);
-	print_level(node->level);
-	/* if (level_is_solved(node->level)) {
-		printf("This is a solution!");
-		exit(EXIT_SUCCESS);
-	} */
+void print_state(struct gamestate* state) {
+	printf("[State %08X, %c]\n", state, state->origin_side);
+	print_level(state->level);
 }
 
-int find_and_remove_player(char* level) {
-	int player_position;
-	for (player_position = 0; !(level[player_position] & PLAYER); player_position++);
-	level[player_position] &= ~PLAYER;
-	level[player_position] |= ORIGINAL_PLAYER;
-	return player_position;
-}
-void player_spread_recursive(char* level, int player_position) {
-	if (level[player_position] & WALL) return;
-	if (level[player_position] & PLAYER) return;
-	if (level[player_position] & BOX) return;
-	level[player_position] |= PLAYER;
-	player_spread_recursive(level, player_position + UP);
-	player_spread_recursive(level, player_position + DOWN);
-	player_spread_recursive(level, player_position + LEFT);
-	player_spread_recursive(level, player_position + RIGHT);
-}
-void player_spread(char* level) {
-	player_spread_recursive(level, find_and_remove_player(level));
-}
-
-void remove_players(char* level) { //also removes original_players
-	int i;
-	for (i = 0; i < WIDTH*HEIGHT; i++) level[i] &= ~(PLAYER | ORIGINAL_PLAYER);
-}
-
-void populate_futures(struct game_state_node* node) { //find every possible future, make game_state_nodes for them, and make this node point to them
-	char* level = node->level;
-	node->futures = (struct game_state_node**) malloc(sizeof(struct game_state_node*) * MAX_POSSIBLE_FUTURES);
-	int f;
-	for (f = 0; f < MAX_POSSIBLE_FUTURES; f++) node->futures[f] = NULL;
-	f = 0;
-	// find every box. for each direction, if player could push it like that, make a copy where that happens
-	int box_position;
+void recursive_player_spread(char* level, int location) {
+	if (level[location] & PLAYER) return;
+	level[location] |= PLAYER;
 	int d;
-	for (box_position = 0; box_position < WIDTH*HEIGHT; box_position++) if (level[box_position] & BOX) {
-		for (d = 0; d < 4; d++) {
-			int dir = DIRECTION[d];
-			if (level[box_position - dir] & PLAYER) if (!(level[box_position + dir] & WALL) && !(level[box_position + dir] & BOX)) {
+	for (d = 0; d < 4; d++) {
+		char adjacent_content = level[location + DIRECTIONS[d]];
+		if (!(adjacent_content & WALL) && !(adjacent_content & BOX)) recursive_player_spread(level, location + DIRECTIONS[d]);
+	}
+}
+void set_player_region(char* level, int player_position) {
+	int i;
+	for (i = 0; i < SIZE; i++) level[i] &= ~(PLAYER | OG_PLAYER);
+	recursive_player_spread(level, player_position);
+	level[player_position] |= OG_PLAYER;
+}
+
+
+void find_post_states(struct gamestate** list, struct gamestate* state) {
+	int i, d, j;
+	char* level = state->level;
+	for (i = 0; i < GROWTH_FACTOR; i++) list[i] = NULL;
+	int entries = 0;
+	for (i = 0; i < SIZE; i++) if (level[i] & BOX) for (d = 0; d < 4; d++) {
+		int before_box = i - DIRECTIONS[d];
+		int after_box = i + DIRECTIONS[d];
+		//before_box is player, after_box is empty space. push the box there
+		if (!(level[before_box] & WALL)) if (!(level[before_box] & BOX)) if (level[before_box] & PLAYER)
+			if (!(level[after_box] & WALL)) if (!(level[after_box] & BOX)) {
 				char* new_level = copy_level(level);
-				remove_players(new_level);
-				new_level[box_position + dir] |= BOX;
-				new_level[box_position] &= ~BOX;
-				new_level[box_position] |= PLAYER;
-				new_level[box_position] |= ORIGINAL_PLAYER;
-				new_level[box_position - dir] &= ~PLAYER;
-				player_spread(new_level);
-				if (level_is_already_dud(new_level)) {
-					free(new_level);
-				} else {
-					node->futures[f++] = make_game_state_node(new_level);
-				}
+				new_level[i] &= ~BOX;
+				new_level[after_box] |= BOX;
+				set_player_region(new_level, i);
+				struct gamestate* new_state = make_gamestate(new_level, state->origin_side);
+				bool already_found = false;
+				for (j = 0; j < entries && !already_found; j++) if (list[j] == new_state) already_found = true;
+				if (!already_found) list[entries++] = new_state;
 			}
-		}
+	}
+}
+void find_pre_states(struct gamestate** list, struct gamestate* state) {
+	int i, d, j;
+	char* level = state->level;
+	for (i = 0; i < GROWTH_FACTOR; i++) list[i] = NULL;
+	int entries = 0;
+	for (i = 0; i < SIZE; i++) if (level[i] & BOX) for (d = 0; d < 4; d++) {
+		int after_box = i + DIRECTIONS[d];
+		int after_after_box = i + 2 * DIRECTIONS[d];
+		//after_box is player, after_after_box is empty space. pull the box
+		if (!(level[after_box] & WALL)) if (!(level[after_box] & BOX)) if (level[after_box] & PLAYER)
+			if (!(level[after_after_box] & WALL)) if (!(level[after_after_box] & BOX)) {
+				char* new_level = copy_level(level);
+				new_level[i] &= ~BOX;
+				new_level[after_box] |= BOX;
+				set_player_region(new_level, after_after_box);
+				struct gamestate* new_state = make_gamestate(new_level, state->origin_side);
+				bool already_found = false;
+				for (j = 0; j < entries && !already_found; j++) if (list[j] == new_state) already_found = true;
+				if (!already_found) list[entries++] = new_state;
+			}
 	}
 }
 
-void print_pathfind_without_touching_boxes_recursive_report(int* previous, char* how_we_got_there, int node) {
-	//printf(":%d\n", node);
-	if (node >= 0) {
-		print_pathfind_without_touching_boxes_recursive_report(previous, how_we_got_there, previous[node]);
-		if (how_we_got_there[node]) printf("%c", how_we_got_there[node]);
+struct gamestate** HEAP;
+int HEAP_CAPACITY;
+int HEAP_MEMBERS;
+void setup_heap(int capacity) {
+	HEAP_CAPACITY = capacity;
+	HEAP = (struct gamestate**) malloc(sizeof(struct gamestate*) * HEAP_CAPACITY);
+	int i;
+	for (i = 0; i < HEAP_CAPACITY; i++)
+		HEAP[i] = NULL;
+	HEAP_MEMBERS = 0;
+}
+void expand_heap_capacity() {
+	struct gamestate** new_heap = (struct gamestate**) malloc(sizeof(struct gamestate*) * HEAP_CAPACITY * 2);
+	int i;
+	for (i = 0; i < HEAP_CAPACITY; i++) new_heap[i] = HEAP[i];
+	for (i = HEAP_CAPACITY; i < HEAP_CAPACITY*2; i++) new_heap[i] = NULL;
+	HEAP_CAPACITY *= 2;
+	free(HEAP);
+	HEAP = new_heap;
+}
+void sift_down(int index) {
+	int left = 2 * index + 1;
+	int right = 2 * index + 2;
+	int smallest = index;
+
+	if (left < HEAP_MEMBERS && HEAP[left]->f_score < HEAP[smallest]->f_score) {
+		smallest = left;
+	}
+	if (right < HEAP_MEMBERS && HEAP[right]->f_score < HEAP[smallest]->f_score) {
+		smallest = right;
+	}
+	if (smallest != index) {
+		struct gamestate* temp = HEAP[index];
+		HEAP[index] = HEAP[smallest];
+		HEAP[smallest] = temp;
+		sift_down(smallest);
 	}
 }
-void print_pathfind_without_touching_boxes(char* level, int start, int end) { //print lowercase. assume start and end are not-box and not-wall
-	if ((level[start] & BOX) || (level[end] & BOX)) {
-		printf("Pathfinding request within state starts or ends on box\n");
-		exit(EXIT_FAILURE);
+void sift_up(int index) {
+	int parent = (index - 1) / 2;
+	if (index > 0 && HEAP[index]->f_score < HEAP[parent]->f_score) {
+		struct gamestate* temp = HEAP[index];
+		HEAP[index] = HEAP[parent];
+		HEAP[parent] = temp;
+		sift_up(parent);
 	}
+}
+void add_to_heap(struct gamestate* state) {
+	if (state->f_score > (INT_MAX/2)-50) return;
+	state->ever_been_in_frontier = true;
+	if (HEAP_MEMBERS >= HEAP_CAPACITY) {
+		expand_heap_capacity();
+	}
+	HEAP[HEAP_MEMBERS] = state;
+	HEAP_MEMBERS++;
+	sift_up(HEAP_MEMBERS - 1);
+	//printf("added to heap, f score %d, from %c\n", state->f_score, (state->origin_side == FROM_LEFT_SIDE) ? 'L' : 'R');
+}
+struct gamestate* heap_pop() {
+	if (HEAP_MEMBERS == 0) return NULL;
+	struct gamestate* top = HEAP[0];
+	HEAP[0] = HEAP[HEAP_MEMBERS - 1];
+	HEAP_MEMBERS--;
+	sift_down(0);
+	return top;
+}
+void heap_update_new_f_score(struct gamestate* state) {
+	int i;
+	for (i = 0; i < HEAP_MEMBERS; i++) if (state == HEAP[i]) {
+		sift_up(i);
+		sift_down(i);
+		return;
+	}
+}
+void print_heap() {
+	printf("======\n");
+	int i;
+	for (i = 0; i < HEAP_MEMBERS; i++) printf("%08X (f = %d)\n", HEAP[i], HEAP[i]->f_score);
+	printf("======\n");
+}
+
+
+
+int* PATHFIND_QUEUE;
+int* PATHFIND_POINT_BACK;
+void setup_pathfinding_structures() {
+	PATHFIND_QUEUE = (int*) malloc(sizeof(int) * SIZE);
+	PATHFIND_POINT_BACK = (int*) malloc(sizeof(int) * SIZE);
+}
+void pathfind_on_map(char* level, int start, int end) {
 	if (start == end) return;
 	int i;
-	int* queue = (int*) malloc(sizeof(int) * WIDTH * HEIGHT);
-	for (i = 0; i < WIDTH*HEIGHT; i++) queue[i] = -1;
-	int* previous = (int*) malloc(sizeof(int) * WIDTH * HEIGHT);
-	for (i = 0; i < WIDTH*HEIGHT; i++) previous[i] = -1;
-	char* how_we_got_there = (char*) malloc(sizeof(char) * WIDTH * HEIGHT);
-	for (i = 0; i < WIDTH*HEIGHT; i++) how_we_got_there[i] = '\0';
+	int q = 0; //point to end of PATHFIND_QUEUE
+	int s = 0; //next item to be popped from PATHFIND_QUEUE
+	for (i = 0; i < SIZE; i++) PATHFIND_POINT_BACK[i] = -1;
 	
-	int q = 0; //end index for queue
-	int s = 0; //start index for queue
+	int d;
 	
-	//set initial
-	queue[q++] = start;
-	previous[start] = -2; //SUPER special. don't make this point back to anywhere else, because it is the start!
+	PATHFIND_QUEUE[q++] = end;
+	PATHFIND_POINT_BACK[end] = -2;
 	
-	//printf("pathfinding from %d to %d\n", start, end);
-	while (true) {
-		int pick = queue[s++];
-		if (pick < 0) {
-			printf("Pathfinding within a step failed\n");
-			//print_level(level);
-			exit(EXIT_FAILURE);
-		}
-		//for every neighbor of pick, if they don't yet have a previous, then they should go through us! add them to the queue!
-		int d;
-		//printf("pick %d\n", pick);
+	while (q > s) {
+		int pick = PATHFIND_QUEUE[s++];
 		for (d = 0; d < 4; d++) {
-			int neighbor = pick + DIRECTION[d];
-			if (!(level[neighbor] & WALL)) if (!(level[neighbor] & BOX)) {
-				if (previous[neighbor] == -1) {
-					previous[neighbor] = pick;
-					how_we_got_there[neighbor] = LURD[d] + ('a' - 'A');
-					queue[q++] = neighbor;
-					if (neighbor == end) {
-						//printf("BFS FOUND LE PATH\n");
-						print_pathfind_without_touching_boxes_recursive_report(previous, how_we_got_there, end);
-						free(queue);
-						free(how_we_got_there);
-						free(previous);
-						return;
-					}
+			int neighbor = pick + DIRECTIONS[d];
+			if (PATHFIND_POINT_BACK[neighbor] != -1) continue;
+			if (level[neighbor] & BOX) continue;
+			if (level[neighbor] & WALL) continue;
+			PATHFIND_POINT_BACK[neighbor] = pick;
+			PATHFIND_QUEUE[q++] = neighbor;
+			if (neighbor == start) {
+				//we can follow PATHFIND_POINT_BACK all the way from the start to the end (end will point to -2)
+				int current = start;
+				int next = PATHFIND_POINT_BACK[current];
+				while (true) {
+					if (next != -2) {
+						int dif = next - current;
+						for (d = 0; d < 4; d++) if (DIRECTIONS[d] == dif) printf("%c", LURD[d] + 'a' - 'A');
+						current = next;
+						next = PATHFIND_POINT_BACK[next];
+					} else break;
 				}
+				return;
 			}
 		}
 	}
-	
-	free(queue);
-	free(how_we_got_there);
-	free(previous);
-	
-	printf("Couldn't perform pathfinding within a state\n");
+	printf("Pathfinding failed\n");
 	exit(EXIT_FAILURE);
 }
-
-void print_solution(struct game_state_node* state) {
-	if (state->previous) {
-		print_solution(state->previous);
-		//printf("Now the transition from %d to %d\n", state->previous->H, state->H);
-		//These are kinda computationally expensive but it's only O(solution length) so it's totally fine
-		int original_player_tile = find_original_player(state->previous->level);
-		int helper_1 = find_location_of_box_that_moved(state->previous->level, state->level);
-		int helper_2 = find_location_of_box_that_moved(state->level, state->previous->level);
-		int transition_offset = helper_2 - helper_1;
-		print_pathfind_without_touching_boxes(state->previous->level, original_player_tile, helper_1-transition_offset);
-		if (transition_offset == LEFT) printf("L");
-		if (transition_offset == UP) printf("U");
-		if (transition_offset == RIGHT) printf("R");
-		if (transition_offset == DOWN) printf("D");
-	}
-	//print_state(state);
+int find_og_player(char* level) {
+	int i;
+	for (i = 0; i < SIZE; i++) if (level[i] & OG_PLAYER) return i;
+	printf("Level has no OG player\n");
+	exit(EXIT_FAILURE);
+}
+int find_missing_box(char* level1, char* level2) { //find box that is in level1 but isn't in level2
+	int i;
+	for (i = 0; i < SIZE; i++) if (level1[i] & BOX) if (!(level2[i] & BOX)) return i;
+	printf("No mismatched boxes\n");
+	exit(EXIT_FAILURE);
+}
+void reconstruct_solution_make_transition(struct gamestate* state1, struct gamestate* state2) {
+	//printf("(How to go from %08X to %08X?)\n", state1, state2);
+	int og_player_start = find_og_player(state1->level);
+	int og_player_end = find_og_player(state2->level);
+	int box_before = find_missing_box(state1->level, state2->level);
+	int box_after = find_missing_box(state2->level, state1->level);
+	int push_direction = box_after - box_before;
+	
+	pathfind_on_map(state1->level, og_player_start, box_before-push_direction);
+	int d;
+	for (d = 0; d < 4; d++) if (DIRECTIONS[d] == push_direction) printf("%c", LURD[d]);
+	pathfind_on_map(state2->level, box_before, og_player_end);
+}
+void reconstruct_solution_left(struct gamestate* state) {
+	if (!state->point_back) return;
+	reconstruct_solution_left(state->point_back);
+	reconstruct_solution_make_transition(state->point_back, state);
+}
+void reconstruct_solution_right(struct gamestate* state) {
+	if (!state->point_back) return;
+	reconstruct_solution_make_transition(state, state->point_back);
+	reconstruct_solution_right(state->point_back);
 }
 
+
+
+
+
 int main() {
+	int i, j, k;
 	
-	//Read input stream, determine WIDTH and HEIGHT
-	char* INPUT = (char*) malloc(sizeof(char) * MAX_SOK_ROW_LENGTH * MAX_SOK_ROW_LENGTH);
-	int input_index = 0;
+	//Read sok into INPUT_SOK
+	INPUT_SOK = (char*) malloc(sizeof(char) * MAX_LEVEL_SIZE);
+	int current_row_width = 0;
 	char c;
+	i = 0;
 	WIDTH = 0;
 	HEIGHT = 0;
-	int current_width_streak = 0;
-	while (true) {
+	do {
 		c = getchar();
-		if (c == EOF || c == '\0') break;
-		INPUT[input_index++] = c;
+		INPUT_SOK[i++] = c;
 		if (c == '\n') {
-			if (current_width_streak > WIDTH) WIDTH = current_width_streak;
-			current_width_streak = 0;
+			if (current_row_width > WIDTH)
+				WIDTH = current_row_width;
+			current_row_width = 0;
 			HEIGHT++;
-		} else {
-			current_width_streak++;
 		}
-	}
-	if (current_width_streak > WIDTH) WIDTH = current_width_streak;
-	if (current_width_streak) HEIGHT++;
-	INPUT[input_index] = '\0';
+		else current_row_width++;
+	} while (c != EOF && c != '\0');
+	if (current_row_width > WIDTH) WIDTH = current_row_width;
+	if (current_row_width) HEIGHT++;
+	DIRECTIONS[0] = LEFT = -1;
+	DIRECTIONS[1] = UP = -WIDTH;
+	DIRECTIONS[2] = RIGHT = 1;
+	DIRECTIONS[3] = DOWN = WIDTH;
 	
-	int i, j;
-	
-	// Establish directions
-	LEFT = DIRECTION[0] = -1;
-	UP = DIRECTION[1] = -WIDTH;
-	RIGHT = DIRECTION[2] = 1;
-	DOWN = DIRECTION[3] = WIDTH;
-	
-	// Read INPUT into level array
-	char* level = (char*) malloc (sizeof(char) * WIDTH * HEIGHT);
-	for (i = 0; i < WIDTH * HEIGHT; i++) level[i] = EMPTY;
-	N_BOXES = 0;
-	N_GOALS = 0;
-	int y = 0;
-	int x = 0;
-	input_index = 0;
-	while (true) {
-		c = INPUT[input_index++];
+	//Read INPUT_SOK into a level
+	char* start_level = (char*) malloc(sizeof(char) * SIZE);
+	for (i = 0; i < SIZE; i++) start_level[i] = 0;
+	N_BOXES = N_GOALS = 0;
+	j = 0;
+	for (i = 0; i < SIZE;) {
+		c = INPUT_SOK[j++];
+		if (c == '\n') {
+			while (i%WIDTH) i++;
+			continue;
+		}
 		if (c == EOF || c == '\0') break;
-		else if (c == '\n') {
-			y++;
-			x = 0;
-		} else {
-			level[y*WIDTH+x] = sok_to_native(c);
-			if (level[y*WIDTH+x] & BOX) N_BOXES++;
-			if (level[y*WIDTH+x] & GOAL) N_GOALS++;
-			if (level[y*WIDTH+x] & PLAYER) N_PLAYERS++;
-			x++;
+		start_level[i] = sok_to_native(c);
+		if (start_level[i] & BOX) N_BOXES++;
+		if (start_level[i] & GOAL) N_GOALS++;
+		i++;
+	}
+	if (N_BOXES != N_GOALS) {
+		printf("Found %d boxes and %d goals\n", N_BOXES, N_GOALS);
+		exit(EXIT_FAILURE);
+	}
+	free(INPUT_SOK);
+	
+	clock_t begin_time = clock();
+	
+	//Compute walking distance matrix
+	BOX_PUSHING_DISTANCE_MATRIX = (int**) malloc(sizeof(int*) * SIZE);
+	for (i = 0; i < SIZE; i++) {
+		BOX_PUSHING_DISTANCE_MATRIX[i] = (int*) malloc(sizeof(int) * SIZE);
+		for (j = 0; j < SIZE; j++) BOX_PUSHING_DISTANCE_MATRIX[i][j] = INT_MAX;
+		BOX_PUSHING_DISTANCE_MATRIX[i][i] = 0;
+	}
+	for (i = 0; i < SIZE; i++) if (!(start_level[i] & WALL)) {
+		for (k = 0; k < 4; k++) {
+			int post = i + DIRECTIONS[k];
+			int pre = i - DIRECTIONS[k];
+			if (pre < 0 || post < 0 || pre >= SIZE || post >= SIZE) continue;
+			if (!(start_level[post] & WALL) && !(start_level[pre] & WALL)) BOX_PUSHING_DISTANCE_MATRIX[i][post] = 1;
 		}
 	}
-	
-	free(INPUT);
-	print_level(level);
-	
-	//TODO: check that the player is bounded by walls
-	if (N_GOALS != N_BOXES) {
-		printf("There are %d goals but %d boxes\n", N_GOALS, N_BOXES);
-		exit(EXIT_FAILURE);
-	}
-	if (N_PLAYERS != 1) {
-		printf("There are %d players\n", N_PLAYERS);
-		exit(EXIT_FAILURE);
-	}
-	MAX_POSSIBLE_FUTURES = N_BOXES * 4 + 1; //maximum number of moves that can be made in any state; always strictly less, so that last pointer can be null
-	GOAL_POSITIONS = (int*) malloc(sizeof(int) * N_GOALS);
-	int g = 0;
-	for (i = 0; g < N_GOALS; i++)
-		if (level[i] & GOAL) GOAL_POSITIONS[g++] = i;
-	BOX_POSITIONS = (int*) malloc(sizeof(int) * N_BOXES);
-	
-	// Compute walking-distance matrix. Used for heuristics. Ignore boxes and goals, only care about walls vs not walls
-	// Floyd and Warshall say hi
-	WALKING_DISTANCE_MATRIX = (int**) malloc(sizeof(int*) * WIDTH * HEIGHT);
-	for (i = 0; i < WIDTH*HEIGHT; i++) {
-		WALKING_DISTANCE_MATRIX[i] = (int*) malloc(sizeof(int) * WIDTH * HEIGHT);
-		for (j = 0; j < WIDTH*HEIGHT; j++) WALKING_DISTANCE_MATRIX[i][j] = INT_MAX;
-		WALKING_DISTANCE_MATRIX[i][i] = 0;
-	}
-	for (i = 0; i < WIDTH*HEIGHT; i++) if (!(level[i] & WALL)) for (j = 0; j < WIDTH*HEIGHT; j++) if (!(level[j] & WALL)) WALKING_DISTANCE_MATRIX[i][j] = 1;
-	int k;
-	for (k = 0; k < WIDTH*HEIGHT; k++) if (!(level[k] & WALL)) {
-		for (i = 0; i < WIDTH*HEIGHT; i++) if (!(level[i] & WALL)) {
-			for (j = 0; j < WIDTH*HEIGHT; j++) if (!(level[j] & WALL)) {
-				int contender_distance = WALKING_DISTANCE_MATRIX[i][k] + WALKING_DISTANCE_MATRIX[k][j];
-				if (contender_distance < WALKING_DISTANCE_MATRIX[i][j])
-					WALKING_DISTANCE_MATRIX[i][j] = contender_distance;
+	for (k = 0; k < SIZE; k++) if (!(start_level[k] & WALL)) {
+		for (i = 0; i < SIZE; i++) if (!(start_level[i] & WALL)) {
+			for (j = 0; j < SIZE; j++) if (!(start_level[j] & WALL)) {
+				int contender_distance = add(BOX_PUSHING_DISTANCE_MATRIX[i][k], BOX_PUSHING_DISTANCE_MATRIX[k][j]);
+				if (contender_distance < BOX_PUSHING_DISTANCE_MATRIX[i][j])
+					BOX_PUSHING_DISTANCE_MATRIX[i][j] = contender_distance;
 			}	
 		}
 	}
 	
-	player_spread(level);
+	//Setup hash table and stuff
+	GAMESTATE_HASH_TABLE = (struct gamestate**) malloc(sizeof(struct gamestate*) * GAMESTATE_HASH_TABLE_SIZE);
+	for (i = 0; i < GAMESTATE_HASH_TABLE_SIZE; i++) GAMESTATE_HASH_TABLE[i] = NULL;
+	INITIAL_BOX_POSITIONS = (int*) malloc(sizeof(int) * N_BOXES);
+	GOAL_POSITIONS = (int*) malloc(sizeof(int) * N_GOALS);
+	j = 0;
+	k = 0;
+	for (i = 0; i < SIZE; i++) {
+		if (start_level[i] & BOX) INITIAL_BOX_POSITIONS[j++] = i;
+		if (start_level[i] & GOAL) GOAL_POSITIONS[k++] = i;
+		if (start_level[i] & PLAYER) INITIAL_PLAYER_POSITION = i;
+	}
 	
-	for (i = 0; i < STATES_HASH_TABLE_SIZE; i++) GAME_STATES_HASH_TABLE[i] = NULL;
-	struct game_state_node* start_state = make_game_state_node(level);
+	set_player_region(start_level, INITIAL_PLAYER_POSITION);
 	
-	struct game_state_node** frontier = (struct game_state_node**) malloc(sizeof(struct game_state_node*) * MAX_FRONTIER_SIZE); //TODO : replace with a heap i guess, that somehow picks minimum G+H
-	for (i = 0; i < MAX_FRONTIER_SIZE; i++) frontier[i] = NULL;
-	
-	frontier[0] = start_state;
+	//Create start state
+	struct gamestate* start_state = make_gamestate(start_level, FROM_LEFT_SIDE);
 	start_state->g_score = 0;
-	start_state->g_score = 0;
+	start_state->f_score = start_state->h_score;
 	
-	//printf("Beginning search...\n");
-	clock_t begin = clock();
-	
-	int iterations = 0;
-	
-	while (true) {
-		int smallest_f_score = INT_MAX;
-		struct game_state_node* pick = NULL; //pick from frontier
-		int pick_position_in_frontier;
-		for (i = 0; i < MAX_FRONTIER_SIZE; i++) {
-			if (frontier[i] == NULL) continue;
-			int f_score = frontier[i]->g_score + frontier[i]->h_score;
-			if (f_score < smallest_f_score) {
-				smallest_f_score = f_score;
-				pick = frontier[i];
-				pick_position_in_frontier = i;
+	//Create end states
+	char* end_level_template = copy_level(start_level);
+	for (i = 0; i < SIZE; i++) if (end_level_template[i] & BOX) end_level_template[i] &= ~BOX;
+	for (i = 0; i < SIZE; i++) if (end_level_template[i] & GOAL) end_level_template[i] |= BOX;
+	struct gamestate** end_states = (struct gamestate**) malloc(sizeof(struct gamestate**) * GROWTH_FACTOR);
+	int end_states_count = 0;
+	for (j = 0; j < GROWTH_FACTOR; j++) end_states[j] = NULL;
+	for (i = 0; i < SIZE; i++) if (end_level_template[i] & BOX) for (k = 0; k < 4; k++) {
+		int player_position = i + DIRECTIONS[k];
+		if (end_level_template[player_position] & BOX) continue;
+		if (end_level_template[player_position] & WALL) continue;
+		char* new_level = copy_level(end_level_template);
+		set_player_region(new_level, player_position);
+		struct gamestate* an_end_state = make_gamestate(new_level, FROM_RIGHT_SIDE);
+		//make sure this isn't an end state we already considered
+		bool already_considered = false;
+		for (j = 0; j < end_states_count && !already_considered; j++)
+			if (end_states[j] == an_end_state) {
+				already_considered = true;
 			}
+		if (!already_considered) {
+			end_states[end_states_count] = an_end_state;
+			an_end_state->g_score = 0;
+			an_end_state->f_score = an_end_state->h_score;
+			end_states_count++;
+			//print_state(an_end_state);
 		}
-		if (pick == NULL) {
-			printf("Frontier is empty\n");
-			exit(EXIT_FAILURE);
-		}
-		if (iterations % 5000 == 0) {
-			clock_t end = clock();
-			double time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
-			if (time_spent > TIMEOUT_TIME) {
-				printf("Took more than %d seconds, abandoning search\n", TIMEOUT_TIME);
-				exit(EXIT_FAILURE);
-			}
-		}
-		iterations++;
-		//printf("Pick from frontier\n");
+	}
+	free(end_level_template);
+	
+	//Prepare heap
+	setup_heap(1024);
+	add_to_heap(start_state);
+	for (i = 0; i < end_states_count; i++) add_to_heap(end_states[i]);
+	if (end_states_count == 0) {
+		printf("Couldn't create ending states\n");
+		exit(EXIT_FAILURE);
+	}
+	if (HEAP_MEMBERS <= 1) {
+		printf("Heap is empty for some reason\n");
+		exit(EXIT_FAILURE);
+	}
+	
+	struct gamestate** neighbors = (struct gamestate**) malloc(sizeof(struct gamestate*) * GROWTH_FACTOR);
+	
+	//A*, from both sides
+	while (HEAP_MEMBERS) {
+		//print_heap();
+		struct gamestate* pick = heap_pop();
+		//printf("Heap has %d members, chose something where f_score = %d\n", HEAP_MEMBERS, pick->f_score);
+		//printf("\n\nPick\n");
 		//print_state(pick);
-		if (level_is_solved(pick->level)) {
-			clock_t end = clock();
-			print_solution(pick);
-			printf("\n\n");
-			//printf("Searched %d states in %d ms\n", GAME_STATE_NODES_MADE, (int)((double)(end - begin) / CLOCKS_PER_SEC * 1000));
-			printf("Found in %d ms\n", (int)((double)(end - begin) / CLOCKS_PER_SEC * 1000));
-			exit(EXIT_SUCCESS);
-		}
-		frontier[pick_position_in_frontier] = NULL;
-		populate_futures(pick);
-		int f;
-		for (f = 0; pick->futures[f]; f++) {
-			struct game_state_node* future = pick->futures[f];
+		//printf("%c", pick->origin_side);
+		
+		if (pick->origin_side == FROM_LEFT_SIDE) find_post_states(neighbors, pick);
+		if (pick->origin_side == FROM_RIGHT_SIDE) find_pre_states(neighbors, pick);
+		
+		for (i = 0; i < GROWTH_FACTOR && neighbors[i]; i++) {
+			struct gamestate* neighbor = neighbors[i];
+			if (neighbor->origin_side != pick->origin_side) {
+				setup_pathfinding_structures();
+				struct gamestate* towards_left = (pick->origin_side == FROM_LEFT_SIDE) ? pick : neighbor;
+				struct gamestate* towards_right = (pick->origin_side == FROM_LEFT_SIDE) ? neighbor : pick;
+				print_level(start_state->level);
+				reconstruct_solution_left(towards_left);
+				reconstruct_solution_make_transition(towards_left, towards_right);
+				reconstruct_solution_right(towards_right);
+				printf("\n");
+				clock_t end_time = clock();
+				printf("(%d ms)\n", (int)((double)(end_time - begin_time) / CLOCKS_PER_SEC * 1000));
+				exit(EXIT_SUCCESS);
+			}
 			int possible_g_score = pick->g_score + 1;
-			if (possible_g_score < future->g_score) {
-				future->previous = pick;
-				future->g_score = possible_g_score;
-				for (i = 0; i < MAX_FRONTIER_SIZE; i++) if (frontier[i] == future) break;
-				if (i == MAX_FRONTIER_SIZE) { //future isn't in frontier, so put it there
-					for (i = 0; i < MAX_FRONTIER_SIZE; i++) if (frontier[i] == NULL) {
-						frontier[i] = future;
-						break;
-					}
-					if (i == MAX_FRONTIER_SIZE) {
-						printf("Ran out of space in frontier (so silly....)\n");
-						exit(EXIT_FAILURE);
-					}
+			if (possible_g_score < neighbor->g_score) {
+				neighbor->point_back = pick;
+				neighbor->g_score = possible_g_score;
+				neighbor->f_score = possible_g_score + neighbor->h_score;
+				if (neighbor->ever_been_in_frontier) {
+					heap_update_new_f_score(neighbor);
+				} else {
+					add_to_heap(neighbor);
 				}
 			}
 		}
 	}
-	
-	//free everything
-	free(GOAL_POSITIONS);
-	free(BOX_POSITIONS);
-	
-	//free all the game state nodes, also free their futures
-	
-	
-	//free the WALKING_DISTANCE_MATRIX
+	printf("Search failed\n");
+	exit(EXIT_FAILURE);
 }
