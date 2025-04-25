@@ -127,7 +127,6 @@ void print_level(char* level) {
 			printf("%c", native_to_sok(level[y*WIDTH+x]));
 		printf("\n");
 	}
-	printf("\n");
 }
 
 void print_state(struct gamestate* state) {
@@ -212,6 +211,7 @@ int main(int nargs, char** arglist) {
 	char* level_template = (char*) malloc(sizeof(char) * SIZE);
 	for (i = 0; i < SIZE; i++) level_template[i] = 0;
 	j = 0;
+	int goals_already_provided = 0;
 	for (i = 0; i < SIZE;) {
 		c = INPUT_SOK[j++];
 		if (c == '\n') {
@@ -220,7 +220,7 @@ int main(int nargs, char** arglist) {
 		}
 		if (c == EOF || c == '\0') break;
 		level_template[i] = sok_to_native(c);
-		if (level_template[i] != WALL && level_template[i] != EMPTY) {
+		/* if (level_template[i] != WALL && level_template[i] != EMPTY) {
 			if (level_template[i] == PLAYER) {
 				//ok that's fine...
 				initial_player_position = i;
@@ -229,6 +229,12 @@ int main(int nargs, char** arglist) {
 				printf("Your inputted level shouldn't have anything other than walls\n");
 				exit(EXIT_FAILURE);
 			}
+		} */
+		if (level_template[i] & PLAYER) initial_player_position = i;
+		level_template[i] &= ~BOX;
+		if (level_template[i] & GOAL) {
+			goals_already_provided++;
+			level_template[i] |= BOX;
 		}
 		i++;
 	}
@@ -238,8 +244,13 @@ int main(int nargs, char** arglist) {
 		printf("You didn't provide a player position\n");
 		exit(EXIT_FAILURE);
 	}
+	if (goals_already_provided > N_GOALS) {
+		printf("You provided %d goals but want %d goals to exist\n", goals_already_provided, N_GOALS);
+		exit(EXIT_FAILURE);
+	}
 	
 	char* indicate_player_region = copy_level(level_template);
+	for (i = 0; i < SIZE; i++) indicate_player_region[i] &= WALL;
 	set_player_region(indicate_player_region, initial_player_position);
 	
 	clock_t begin_time = clock();
@@ -258,13 +269,13 @@ int main(int nargs, char** arglist) {
 	//Generate a bunch of levels based on level_template
 	for (i = 0; i < SPAWN_GROUP_SIZE; i++) {
 		char* level = copy_level(level_template);
-		int things_placed = 0;
+		int things_placed = goals_already_provided;
 		int player_spot;
 		for (j = 0; j < 100 && things_placed < N_BOXES+1; j++) { //j is # attempts at placing things
 			int spot = rand() % SIZE;
 			if (!(indicate_player_region[spot] & PLAYER)) continue;
 			if (level[spot]) continue;
-			if (things_placed) {
+			if (things_placed > goals_already_provided) {
 				level[spot] = BOX | GOAL;
 			} else {
 				level[spot] = PLAYER | OG_PLAYER;
@@ -277,11 +288,11 @@ int main(int nargs, char** arglist) {
 		set_player_region(level, player_spot);
 		struct gamestate* state = make_new_gamestate(level, 0);
 		if (state) {
-			printf("Good one %d\n", push_spot);
-			//print_level(level);
+			printf("Made starting state #%d\n", push_spot);
+			print_level(level);
 			queue[push_spot++] = state;
 		} else {
-			printf("Fail");
+			printf("Spawn attempt #%d failed\n", i);
 			free(level);
 		}
 	}
@@ -307,5 +318,6 @@ int main(int nargs, char** arglist) {
 	printf("\n\n\n");
 	if (push_spot == QUEUE_SIZE) printf("Queue full, so stopping search\n");
 	else printf("Found absolute maximum shuffle!\n");
+	print_level(most_complex->level);
 	exit(EXIT_FAILURE);
 }

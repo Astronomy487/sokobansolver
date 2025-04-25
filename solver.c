@@ -475,6 +475,7 @@ int main() {
 	free(INPUT_SOK);
 	
 	clock_t begin_time = clock();
+	clock_t end_time;
 	
 	//Compute walking distance matrix
 	BOX_PUSHING_DISTANCE_MATRIX = (int**) malloc(sizeof(int*) * SIZE);
@@ -567,9 +568,15 @@ int main() {
 	struct gamestate** neighbors = (struct gamestate**) malloc(sizeof(struct gamestate*) * GROWTH_FACTOR);
 	
 	//A*, from both sides
+	unsigned long long int iterations_ran = 0;
 	while (HEAP_MEMBERS) {
 		//print_heap();
 		struct gamestate* pick = heap_pop();
+		iterations_ran++;
+		if (iterations_ran%1000000 == 0) {
+			end_time = clock();
+			printf("Checked %d million positions (%d s)\n", iterations_ran/1000000, (int)((double)(end_time - begin_time) / CLOCKS_PER_SEC));
+		}
 		//printf("Heap has %d members, chose something where f_score = %d\n", HEAP_MEMBERS, pick->f_score);
 		//printf("\n\nPick\n");
 		//print_state(pick);
@@ -589,8 +596,8 @@ int main() {
 				reconstruct_solution_make_transition(towards_left, towards_right);
 				reconstruct_solution_right(towards_right);
 				printf("\n");
-				clock_t end_time = clock();
-				printf("(%d ms)\n", (int)((double)(end_time - begin_time) / CLOCKS_PER_SEC * 1000));
+				end_time = clock();
+				printf("(%d s)\n", (int)((double)(end_time - begin_time) / CLOCKS_PER_SEC));
 				exit(EXIT_SUCCESS);
 			}
 			int possible_g_score = pick->g_score + 1;
@@ -609,3 +616,13 @@ int main() {
 	printf("Search failed\n");
 	exit(EXIT_FAILURE);
 }
+
+/*
+
+Inefficiencies to address
+- Use Hungarian method for heuristic function
+- Fix the bad walking routines - it seems to not only be at the meeting point!!! It does weird stuff for the second half of the solve too
+- Instead of a "future state" being 1 box push, it should be any consecutive pushes of the box? Consecutive pushes along a line?
+	Look into what algorithm Sokoban++ uses to calculate "single box push"
+
+*/
